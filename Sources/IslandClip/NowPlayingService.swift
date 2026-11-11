@@ -14,6 +14,8 @@ struct NowPlayingInfo: Equatable {
     var isPlaying: Bool
     var bundleID: String?
     var artworkID: String?
+    /// False when showing an app other than the system's now-playing app.
+    var canSeek: Bool = true
 
     /// Playback position at `date`, extrapolated while playing.
     func position(at date: Date) -> Double {
@@ -117,6 +119,7 @@ final class NowPlayingService: ObservableObject {
     func previous() { send("prev") }
 
     func seek(to seconds: Double) {
+        guard info?.canSeek != false else { return }
         send(String(format: "seek %.2f", seconds))
         if var current = info {
             current.elapsed = seconds
@@ -174,7 +177,8 @@ final class NowPlayingService: ObservableObject {
             rate: object["rate"] as? Double ?? 0,
             isPlaying: object["playing"] as? Bool ?? false,
             bundleID: object["bundleID"] as? String,
-            artworkID: object["artworkID"] as? String)
+            artworkID: object["artworkID"] as? String,
+            canSeek: object["canSeek"] as? Bool ?? true)
 
         var newArtwork: (id: String, image: NSImage, color: Color, onLight: Color)?
         if let id = parsed.artworkID, let base64 = object["artwork"] as? String,

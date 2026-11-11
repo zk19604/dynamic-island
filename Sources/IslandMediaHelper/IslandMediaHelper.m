@@ -30,6 +30,17 @@ typedef CFStringRef (*MRClientStringFn)(id);
 typedef void (*MRRegisterFn)(dispatch_queue_t);
 typedef Boolean (*MRSendCommandFn)(int, CFDictionaryRef);
 typedef void (*MRSetElapsedFn)(double);
+typedef void (^MRArrayBlock)(CFArrayRef items);
+typedef void (^MRStateBlock)(unsigned int state);
+typedef void (*MRGetClientsFn)(dispatch_queue_t, MRArrayBlock);
+typedef id (*MRGetLocalOriginFn)(void);
+typedef id (*MRPlayerPathCreateFn)(id origin, id client, id player);
+typedef void (*MRGetStateForPlayerFn)(id path, dispatch_queue_t, MRStateBlock);
+typedef void (^MRPlayerInfoBlock)(CFDictionaryRef info, void *unused);
+/// Verified from the macOS 26 binary: (playerPath, includeArtwork, queue, completion).
+typedef void (*MRGetInfoForPlayerFn)(id path, Boolean includeArtwork, dispatch_queue_t, MRPlayerInfoBlock);
+typedef void (*MRSendCommandToAppFn)(int, CFDictionaryRef, id origin, CFStringRef bundleID,
+                                     unsigned int options, dispatch_queue_t, void *completion);
 
 static MRGetNowPlayingInfoFn gGetInfo;
 static MRGetIsPlayingFn gGetIsPlaying;
@@ -38,6 +49,18 @@ static MRClientStringFn gClientBundleID;
 static MRClientStringFn gClientParentBundleID;
 static MRSendCommandFn gSendCommand;
 static MRSetElapsedFn gSetElapsed;
+static MRGetClientsFn gGetClients;
+static MRGetLocalOriginFn gGetLocalOrigin;
+static MRPlayerPathCreateFn gPlayerPathCreate;
+static MRGetStateForPlayerFn gGetStateForPlayer;
+static MRGetInfoForPlayerFn gGetInfoForPlayer;
+static MRSendCommandToAppFn gSendCommandToApp;
+
+/// Bundle id of a playing app shown instead of the system's "now playing"
+/// app (which can be a paused browser tab while Spotify plays). Commands go
+/// to this app when set.
+static NSString *gTargetBundleID = nil;
+static const unsigned int kMRPlaybackStatePlaying = 1;
 
 static NSString *gLastArtworkKey = nil;
 static BOOL gRefreshPending = NO;
@@ -58,7 +81,7 @@ static id jsonSafe(id value) {
     return nil;
 }
 
-static void emit(NSDictionary *info, BOOL isPlaying, NSString *bundleID) {
+static void emit(NSDictionary *info, BOOL isPlaying, NSString *bundleID, BOOL canSeek) {
     NSMutableDictionary *out = [NSMutableDictionary dictionary];
     NSString *title = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoTitle"]);
     if (title.length == 0) {
@@ -74,6 +97,7 @@ static void emit(NSDictionary *info, BOOL isPlaying, NSString *bundleID) {
     out[@"rate"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"]) ?: @0;
     out[@"timestamp"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoTimestamp"]) ?: @([[NSDate date] timeIntervalSince1970]);
     out[@"playing"] = @(isPlaying);
+    out[@"canSeek"] = @(canSeek);
     if (bundleID.length) out[@"bundleID"] = bundleID;
 
     NSData *artwork = info[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
@@ -93,22 +117,78 @@ static void emit(NSDictionary *info, BOOL isPlaying, NSString *bundleID) {
     writeLine(out);
 }
 
+static void scheduleRefresh(double delay);
+
+static NSString *bundleIDForClient(id client) {
+    if (!client || !gClientBundleID) return nil;
+    NSString *bundleID = nil;
+    if (gClientParentBundleID) bundleID = (__bridge NSString *)gClientParentBundleID(client);
+    if (bundleID.length == 0) bundleID = (__bridge NSString *)gClientBundleID(client);
+    return bundleID;
+}
+
+static BOOL perPlayerAvailable(void) {
+    return gGetClients && gGetLocalOrigin && gPlayerPathCreate && gGetStateForPlayer
+        && gGetInfoForPlayer && gSendCommandToApp && gClientBundleID;
+}
+
+/// The system's "now playing" app is paused: look through every app with a
+/// media session and show the first one that is actually playing.
+/// `fallback` emits the (paused) system app when nothing else plays.
+static void findOtherPlayingClient(NSString *systemBundleID, void (^fallback)(void)) {
+    dispatch_queue_t q = dispatch_get_main_queue();
+    gGetClients(q, ^(CFArrayRef cfClients) {
+        NSArray *clients = [(__bridge NSArray *)cfClients copy] ?: @[];
+        id origin = gGetLocalOrigin();
+        __block NSUInteger index = 0;
+        __block void (^next)(void);
+        __block __weak void (^weakNext)(void);
+        next = ^{
+            if (index >= clients.count) { gTargetBundleID = nil; next = nil; fallback(); return; }
+            id client = clients[index++];
+            NSString *bundleID = bundleIDForClient(client);
+            if (bundleID.length == 0 || [bundleID isEqualToString:systemBundleID]) { weakNext(); return; }
+            id path = gPlayerPathCreate(origin, client, nil);
+            if (!path) { weakNext(); return; }
+            gGetStateForPlayer(path, q, ^(unsigned int state) {
+                if (state != kMRPlaybackStatePlaying) { weakNext(); return; }
+                gGetInfoForPlayer(path, true, q, ^(CFDictionaryRef cfInfo, void *unused) {
+                    NSDictionary *info = [(__bridge NSDictionary *)cfInfo copy] ?: @{};
+                    if (![info[@"kMRMediaRemoteNowPlayingInfoTitle"] isKindOfClass:[NSString class]]) { weakNext(); return; }
+                    gTargetBundleID = bundleID;
+                    emit(info, YES, bundleID, NO);
+                    next = nil; // break the retain cycle
+                    // The system only posts change notifications for its own
+                    // now-playing app, so check this one again shortly
+                    // (catches track changes and pauses). Cheap: one query.
+                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), q, ^{
+                        if (gTargetBundleID) scheduleRefresh(0);
+                    });
+                });
+            });
+        };
+        weakNext = next;
+        next();
+    });
+}
+
 static void refreshNow(void) {
     dispatch_queue_t q = dispatch_get_main_queue();
     gGetIsPlaying(q, ^(Boolean playing) {
         gGetInfo(q, ^(CFDictionaryRef cfInfo) {
             NSDictionary *info = [(__bridge NSDictionary *)cfInfo copy] ?: @{};
+            void (^finish)(NSString *) = ^(NSString *bundleID) {
+                if (playing || !perPlayerAvailable()) {
+                    gTargetBundleID = nil;
+                    emit(info, playing, bundleID, YES);
+                } else {
+                    findOtherPlayingClient(bundleID, ^{ emit(info, playing, bundleID, YES); });
+                }
+            };
             if (gGetClient && gClientBundleID) {
-                gGetClient(q, ^(id client) {
-                    NSString *bundleID = nil;
-                    if (client) {
-                        if (gClientParentBundleID) bundleID = (__bridge NSString *)gClientParentBundleID(client);
-                        if (bundleID.length == 0) bundleID = (__bridge NSString *)gClientBundleID(client);
-                    }
-                    emit(info, playing, bundleID);
-                });
+                gGetClient(q, ^(id client) { finish(bundleIDForClient(client)); });
             } else {
-                emit(info, playing, nil);
+                finish(nil);
             }
         });
     });
@@ -124,15 +204,25 @@ static void scheduleRefresh(double delay) {
     });
 }
 
+/// Sends to the app being shown: a specific playing app if we picked one,
+/// otherwise the system's now-playing app.
+static void send(int command) {
+    if (gTargetBundleID && gSendCommandToApp) {
+        gSendCommandToApp(command, NULL, NULL, (__bridge CFStringRef)gTargetBundleID, 0, NULL, NULL);
+    } else {
+        gSendCommand(command, NULL);
+    }
+}
+
 static void handleCommand(NSString *line) {
     NSArray<NSString *> *parts = [line componentsSeparatedByString:@" "];
     NSString *cmd = parts.firstObject;
-    if ([cmd isEqualToString:@"toggle"]) gSendCommand(kMRTogglePlayPause, NULL);
-    else if ([cmd isEqualToString:@"play"]) gSendCommand(kMRPlay, NULL);
-    else if ([cmd isEqualToString:@"pause"]) gSendCommand(kMRPause, NULL);
-    else if ([cmd isEqualToString:@"next"]) gSendCommand(kMRNextTrack, NULL);
-    else if ([cmd isEqualToString:@"prev"]) gSendCommand(kMRPreviousTrack, NULL);
-    else if ([cmd isEqualToString:@"seek"] && parts.count > 1 && gSetElapsed) gSetElapsed(parts[1].doubleValue);
+    if ([cmd isEqualToString:@"toggle"]) send(kMRTogglePlayPause);
+    else if ([cmd isEqualToString:@"play"]) send(kMRPlay);
+    else if ([cmd isEqualToString:@"pause"]) send(kMRPause);
+    else if ([cmd isEqualToString:@"next"]) send(kMRNextTrack);
+    else if ([cmd isEqualToString:@"prev"]) send(kMRPreviousTrack);
+    else if ([cmd isEqualToString:@"seek"] && parts.count > 1 && gSetElapsed && !gTargetBundleID) gSetElapsed(parts[1].doubleValue);
     else if ([cmd isEqualToString:@"refresh"]) { /* just refresh below */ }
     else return;
     scheduleRefresh(0.25);
@@ -175,6 +265,12 @@ void islandmedia_run(void *unused1, void *unused2) {
     gClientParentBundleID = (MRClientStringFn)dlsym(mr, "MRNowPlayingClientGetParentAppBundleIdentifier");
     gSendCommand = (MRSendCommandFn)dlsym(mr, "MRMediaRemoteSendCommand");
     gSetElapsed = (MRSetElapsedFn)dlsym(mr, "MRMediaRemoteSetElapsedTime");
+    gGetClients = (MRGetClientsFn)dlsym(mr, "MRMediaRemoteGetNowPlayingClients");
+    gGetLocalOrigin = (MRGetLocalOriginFn)dlsym(mr, "MRMediaRemoteGetLocalOrigin");
+    gPlayerPathCreate = (MRPlayerPathCreateFn)dlsym(mr, "MRNowPlayingPlayerPathCreate");
+    gGetStateForPlayer = (MRGetStateForPlayerFn)dlsym(mr, "MRMediaRemoteGetPlaybackStateForPlayer");
+    gGetInfoForPlayer = (MRGetInfoForPlayerFn)dlsym(mr, "MRMediaRemoteGetNowPlayingInfoForPlayer");
+    gSendCommandToApp = (MRSendCommandToAppFn)dlsym(mr, "MRMediaRemoteSendCommandToApp");
     MRRegisterFn registerFn = (MRRegisterFn)dlsym(mr, "MRMediaRemoteRegisterForNowPlayingNotifications");
     if (!gGetInfo || !gGetIsPlaying || !gSendCommand || !registerFn) {
         writeLine(@{ @"error": @"MediaRemote symbols missing" });
