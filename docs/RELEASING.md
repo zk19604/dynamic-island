@@ -77,8 +77,8 @@ brew install zk19604/tap/dynamic-island      # compiles; takes a few minutes the
 brew test dynamic-island
 brew audit --strict --new dynamic-island
 brew audit --strict --online zk19604/tap/dynamic-island
-ln -sf "$(brew --prefix)/opt/dynamic-island/dynamic-island.app" ~/Applications/dynamic-island.app
-open ~/Applications/dynamic-island.app
+cp -R "$(brew --prefix)/opt/dynamic-island/dynamic-island.app" /Applications/
+open /Applications/dynamic-island.app
 ```
 
 If you edit the formula locally, `brew reinstall --build-from-source dynamic-island`
@@ -105,7 +105,8 @@ rebuilds it.
   break the app's ad-hoc signature. With it, the signed bundle is installed
   untouched.
 - **Location.** Formulae can't install into `/Applications`, so the app lives in
-  `$(brew --prefix)/opt/dynamic-island/dynamic-island.app` and the caveats explain
-  the `~/Applications` symlink.
+  `$(brew --prefix)/opt/dynamic-island/dynamic-island.app`. The README tells
+  users to copy it into `/Applications` (symlinks are usually ignored by
+  Launchpad and Spotlight) and to repeat the copy after `brew upgrade`.
 - **No quarantine.** The app is compiled locally, so Gatekeeper doesn't block
   it even though it's only ad-hoc signed.

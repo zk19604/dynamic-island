@@ -34,7 +34,7 @@ swift build -c release          # compile only
 swift test                      # unit tests
 scripts/build_app.sh            # build + assemble + ad-hoc sign → build/dynamic-island.app
 open build/dynamic-island.app
-scripts/install_local.sh        # build, copy to ~/Applications, launch
+scripts/install_local.sh        # build, copy to ~/Applications, launch (for development)
 ```
 
 `UNIVERSAL=1 scripts/build_app.sh` builds an arm64 + x86_64 app (requires the
@@ -44,16 +44,48 @@ Debug flag: `open build/dynamic-island.app --args --expanded` keeps the island o
 
 ## Install with Homebrew
 
+**1. Install** (needs the Xcode Command Line Tools: `xcode-select --install`):
+
 ```sh
-brew tap zk19604/tap
 brew install zk19604/tap/dynamic-island
-ln -sf "$(brew --prefix)/opt/dynamic-island/dynamic-island.app" ~/Applications/dynamic-island.app
-open ~/Applications/dynamic-island.app
 ```
 
-The first install takes a few minutes because Homebrew compiles the app from
-source. Building locally is also why macOS opens it without a Gatekeeper
-warning: nothing was downloaded as a binary, so nothing is quarantined.
+This taps `zk19604/tap`, downloads the source and compiles it, so the first
+install takes a minute or two. Building on your Mac is also why it opens
+without a Gatekeeper warning: nothing was downloaded as a binary, so nothing
+is quarantined, and no Apple Developer account is involved.
+
+**2. Put it in your Applications folder** (so it shows in Finder, Launchpad
+and Spotlight):
+
+```sh
+cp -R "$(brew --prefix)/opt/dynamic-island/dynamic-island.app" /Applications/
+open /Applications/dynamic-island.app
+```
+
+You'll see the island at the top-center of the screen and a capsule icon in
+the menu bar.
+
+**Why the extra step?** Homebrew can't install apps into `/Applications`, so
+it keeps the app at `$(brew --prefix)/opt/dynamic-island/dynamic-island.app`.
+A symlink (`ln -s`) to it works for launching, but Launchpad and Spotlight
+usually ignore symlinks, and a link in `~/Applications` (the personal folder
+inside your home folder) doesn't show under "Applications" in Finder's
+sidebar, which is `/Applications`. A real copy avoids both problems.
+
+**Updating:**
+
+```sh
+brew update
+brew upgrade dynamic-island
+# Quit the app from the menu bar first, then refresh your copy:
+rm -rf /Applications/dynamic-island.app
+cp -R "$(brew --prefix)/opt/dynamic-island/dynamic-island.app" /Applications/
+open /Applications/dynamic-island.app
+```
+
+The copy in `/Applications` doesn't update itself; repeat the copy after
+every upgrade. Your history, notes and settings are kept.
 
 ## Using it
 
@@ -109,9 +141,15 @@ playing: ~0.0% for the app and helper.
 1. Quit from the menu bar icon. If you turned on Launch at Login, turn it
    off first.
 2. Remove the app:
-   - Local install: `rm -rf ~/Applications/dynamic-island.app`
-   - Homebrew: `brew uninstall dynamic-island && rm -f ~/Applications/dynamic-island.app`
-3. Remove data (optional): `rm -rf ~/Library/Application\ Support/dynamic-island`
+   - Homebrew install:
+     ```sh
+     brew uninstall dynamic-island
+     brew untap zk19604/tap        # optional
+     rm -rf /Applications/dynamic-island.app
+     ```
+   - Local build (`scripts/install_local.sh`): `rm -rf ~/Applications/dynamic-island.app`
+3. Remove data (optional, deletes clipboard history and notes):
+   `rm -rf ~/Library/Application\ Support/dynamic-island`
 4. Remove preferences (optional): `defaults delete com.zk19604.dynamic-island`
 
 ## Project layout

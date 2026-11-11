@@ -36,15 +36,16 @@ class DynamicIsland < Formula
       dynamic-island.app was installed to:
         #{opt_prefix}/dynamic-island.app
 
-      To make it show up in Launchpad/Spotlight, link it into ~/Applications:
-        mkdir -p ~/Applications
-        ln -sf "#{opt_prefix}/dynamic-island.app" ~/Applications/dynamic-island.app
+      Homebrew can't install apps into /Applications. Copy it there so it
+      shows in Finder, Launchpad and Spotlight (symlinks are usually ignored):
+        cp -R "#{opt_prefix}/dynamic-island.app" /Applications/
+        open /Applications/dynamic-island.app
 
-      Launch it with:
-        open "#{opt_prefix}/dynamic-island.app"
+      After `brew upgrade dynamic-island`, quit the app and refresh the copy:
+        rm -rf /Applications/dynamic-island.app
+        cp -R "#{opt_prefix}/dynamic-island.app" /Applications/
 
-      "Launch at Login" (menu bar icon) registers the app at its current path.
-      Re-enable it after `brew upgrade dynamic-island` if it stops starting at login.
+      "Launch at Login" (menu bar icon) registers the copy you launched.
     EOS
   end
 
