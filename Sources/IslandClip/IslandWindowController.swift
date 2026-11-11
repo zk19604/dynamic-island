@@ -39,7 +39,8 @@ final class IslandWindowController {
         let actions = IslandActions(
             copy: { [weak self] item in self?.copyBack(item) },
             collapse: { [weak self] in self?.collapse(force: true) },
-            focusPanel: { [weak self] in self?.panel.makeKey() })
+            focusPanel: { [weak self] in self?.panel.makeKey() },
+            showPlayerControls: { [weak self] id in self?.showPlayerControls(id) })
         let root = IslandRootView(model: model, services: services, actions: actions)
         hostingView = IslandHostingView(rootView: root)
         hostingView.sizingOptions = []
@@ -70,8 +71,9 @@ final class IslandWindowController {
             .store(in: &cancellables)
 
         services.nowPlaying.$info
+            .combineLatest(services.nowPlaying.$players.map(\.count).removeDuplicates())
             .receive(on: DispatchQueue.main)
-            .sink { [weak self] info in self?.nowPlayingChanged(info) }
+            .sink { [weak self] info, count in self?.nowPlayingChanged(info, playerCount: count) }
             .store(in: &cancellables)
 
         setWindowFrame(for: model.shapeSize, shadow: false)
@@ -236,10 +238,18 @@ final class IslandWindowController {
         services.nowPlaying.info?.isPlaying == true ? .music : .none
     }
 
-    private func nowPlayingChanged(_ info: NowPlayingInfo?) {
-        let wantsCard = info != nil
-        if wantsCard != model.showsMediaCard {
-            transition(media: wantsCard, animation: Constants.expandSpring)
+    private func showPlayerControls(_ id: String?) {
+        guard id != model.expandedPlayerID, model.isExpanded || id == nil else { return }
+        transition(expandedPlayer: .some(id), animation: Constants.expandSpring)
+    }
+
+    private func nowPlayingChanged(_ info: NowPlayingInfo?, playerCount: Int) {
+        let count = min(playerCount, Constants.maxMediaRows)
+        // Close a row whose app went away, or when only one app is left.
+        let visible = services.nowPlaying.players.prefix(Constants.maxMediaRows).map(\.id)
+        let openID = model.expandedPlayerID.flatMap { count > 1 && visible.contains($0) ? $0 : nil }
+        if count != model.mediaPlayerCount || openID != model.expandedPlayerID {
+            transition(mediaPlayers: count, expandedPlayer: .some(openID), animation: Constants.expandSpring)
         }
         guard model.activity != .copied else { return }
         if info?.isPlaying == true {
@@ -261,12 +271,16 @@ final class IslandWindowController {
     /// Applies a state change with a spring, growing the window first if
     /// needed and shrinking it after the animation settles.
     private func transition(expanded: Bool? = nil, activity: LiveActivity? = nil,
-                            media: Bool? = nil, animation: Animation) {
+                            mediaPlayers: Int? = nil, expandedPlayer: String?? = nil,
+                            animation: Animation) {
         let newExpanded = expanded ?? model.isExpanded
         let newActivity = activity ?? model.activity
-        let newMedia = media ?? model.showsMediaCard
+        let newMedia = mediaPlayers ?? model.mediaPlayerCount
+        // Collapsing the island closes any open media row.
+        let newOpenPlayer = newExpanded ? (expandedPlayer ?? model.expandedPlayerID) : nil
         let old = model.shapeSize
-        let new = model.shapeSize(expanded: newExpanded, activity: newActivity, media: newMedia)
+        let new = model.shapeSize(expanded: newExpanded, activity: newActivity, mediaPlayers: newMedia,
+                                  mediaControls: newOpenPlayer != nil)
         let shadow = newExpanded || model.isExpanded
         setWindowFrame(for: CGSize(width: max(old.width, new.width), height: max(old.height, new.height)),
                        shadow: shadow)
@@ -274,7 +288,8 @@ final class IslandWindowController {
         withAnimation(animation) {
             model.isExpanded = newExpanded
             model.activity = newActivity
-            model.showsMediaCard = newMedia
+            model.mediaPlayerCount = newMedia
+            model.expandedPlayerID = newOpenPlayer
         }
 
         settleWork?.cancel()

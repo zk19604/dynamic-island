@@ -136,6 +136,32 @@ final class ClipboardStoreTests: XCTestCase {
     }
 }
 
+final class MigrationTests: XCTestCase {
+    func testMovesLegacyFolderOnceAndKeepsData() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("IslandClipMigration-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: base) }
+        let old = base.appendingPathComponent("IslandClip")
+        try fm.createDirectory(at: old, withIntermediateDirectories: true)
+        try Data("[]".utf8).write(to: old.appendingPathComponent("history.json"))
+
+        XCTAssertTrue(Persistence.migrateLegacyDirectory(in: base))
+        XCTAssertFalse(fm.fileExists(atPath: old.path))
+        XCTAssertTrue(fm.fileExists(atPath: base.appendingPathComponent("dynamic-island/history.json").path))
+        XCTAssertFalse(Persistence.migrateLegacyDirectory(in: base), "second run does nothing")
+    }
+
+    func testDoesNotOverwriteExistingNewFolder() throws {
+        let fm = FileManager.default
+        let base = fm.temporaryDirectory.appendingPathComponent("IslandClipMigration-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: base) }
+        try fm.createDirectory(at: base.appendingPathComponent("IslandClip"), withIntermediateDirectories: true)
+        try fm.createDirectory(at: base.appendingPathComponent("dynamic-island"), withIntermediateDirectories: true)
+        XCTAssertFalse(Persistence.migrateLegacyDirectory(in: base))
+        XCTAssertTrue(fm.fileExists(atPath: base.appendingPathComponent("IslandClip").path))
+    }
+}
+
 final class NotesStoreTests: XCTestCase {
     func testNotesRoundTrip() throws {
         let dir = FileManager.default.temporaryDirectory.appendingPathComponent("IslandClipNotes-\(UUID().uuidString)")

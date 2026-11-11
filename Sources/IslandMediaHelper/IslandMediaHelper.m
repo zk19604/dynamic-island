@@ -5,8 +5,8 @@
 // them, and perl can load this small library with DynaLoader. The app runs
 //   /usr/bin/perl -e '<loader>' /path/to/libIslandMediaHelper.dylib
 // and talks to it over pipes:
-//   stdout: one JSON object per line describing the current media
-//   stdin:  commands, one per line: toggle | play | pause | next | prev | seek <seconds>
+//   stdout: one JSON object per line: {"players": [...]}, every app with media
+//   stdin:  commands, one per line: toggle|play|pause|next|prev [bundleID], seek <seconds> [bundleID]
 // No network, no permissions. Only local system media state is read.
 
 #import <Foundation/Foundation.h>
@@ -39,8 +39,6 @@ typedef void (*MRGetStateForPlayerFn)(id path, dispatch_queue_t, MRStateBlock);
 typedef void (^MRPlayerInfoBlock)(CFDictionaryRef info, void *unused);
 /// Verified from the macOS 26 binary: (playerPath, includeArtwork, queue, completion).
 typedef void (*MRGetInfoForPlayerFn)(id path, Boolean includeArtwork, dispatch_queue_t, MRPlayerInfoBlock);
-typedef void (*MRSendCommandToAppFn)(int, CFDictionaryRef, id origin, CFStringRef bundleID,
-                                     unsigned int options, dispatch_queue_t, void *completion);
 
 static MRGetNowPlayingInfoFn gGetInfo;
 static MRGetIsPlayingFn gGetIsPlaying;
@@ -54,15 +52,20 @@ static MRGetLocalOriginFn gGetLocalOrigin;
 static MRPlayerPathCreateFn gPlayerPathCreate;
 static MRGetStateForPlayerFn gGetStateForPlayer;
 static MRGetInfoForPlayerFn gGetInfoForPlayer;
-static MRSendCommandToAppFn gSendCommandToApp;
 
-/// Bundle id of a playing app shown instead of the system's "now playing"
-/// app (which can be a paused browser tab while Spotify plays). Commands go
-/// to this app when set.
-static NSString *gTargetBundleID = nil;
+/// Bundle id of the system's "now playing" app (from the last refresh).
+static NSString *gSystemBundleID = nil;
+/// How many apps besides the system one have a media session. The system
+/// only posts change notifications for its own app, so these are polled.
+static NSUInteger gOtherPlayerCount = 0;
 static const unsigned int kMRPlaybackStatePlaying = 1;
 
-static NSString *gLastArtworkKey = nil;
+/// Artwork keys already sent to the app (it caches images by key).
+static NSMutableSet<NSString *> *gSentArtwork = nil;
+/// Per app: "title|album" -> artwork key, so polls can skip artwork data.
+static NSMutableDictionary<NSString *, NSArray<NSString *> *> *gArtworkKeyByApp = nil;
+static NSString *gLastPayload = nil;
+static NSUInteger gGeneration = 0;
 static BOOL gRefreshPending = NO;
 
 enum { kMRPlay = 0, kMRPause = 1, kMRTogglePlayPause = 2, kMRNextTrack = 4, kMRPreviousTrack = 5 };
@@ -81,43 +84,75 @@ static id jsonSafe(id value) {
     return nil;
 }
 
-static void emit(NSDictionary *info, BOOL isPlaying, NSString *bundleID, BOOL canSeek) {
-    NSMutableDictionary *out = [NSMutableDictionary dictionary];
+static NSString *artworkSignature(NSDictionary *info) {
+    return [NSString stringWithFormat:@"%@|%@", jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoTitle"]) ?: @"",
+            jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoAlbum"]) ?: @""];
+}
+
+/// One player as JSON-ready values, or nil if it has no title.
+/// Artwork bytes (if any) go in `artworkOut` keyed by artwork id.
+static NSMutableDictionary *playerEntry(NSDictionary *info, BOOL isPlaying, NSString *bundleID, BOOL isSystem,
+                                        NSMutableDictionary<NSString *, NSData *> *artworkOut) {
     NSString *title = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoTitle"]);
-    if (title.length == 0) {
-        gLastArtworkKey = nil;
-        writeLine(@{ @"empty": @YES });
-        return;
-    }
+    if (![title isKindOfClass:[NSString class]] || title.length == 0) return nil;
+    NSMutableDictionary *out = [NSMutableDictionary dictionary];
     out[@"title"] = title;
     out[@"artist"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoArtist"]) ?: @"";
     out[@"album"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoAlbum"]) ?: @"";
     out[@"duration"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoDuration"]) ?: @0;
     out[@"elapsed"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoElapsedTime"]) ?: @0;
     out[@"rate"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoPlaybackRate"]) ?: @0;
-    out[@"timestamp"] = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoTimestamp"]) ?: @([[NSDate date] timeIntervalSince1970]);
+    id timestamp = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoTimestamp"]);
+    if (timestamp) out[@"timestamp"] = timestamp;
     out[@"playing"] = @(isPlaying);
-    out[@"canSeek"] = @(canSeek);
+    out[@"system"] = @(isSystem);
+    // Seeking only works reliably for the system's now-playing app.
+    out[@"canSeek"] = @(isSystem);
     if (bundleID.length) out[@"bundleID"] = bundleID;
 
+    NSString *appKey = bundleID ?: @"";
     NSData *artwork = info[@"kMRMediaRemoteNowPlayingInfoArtworkData"];
     if ([artwork isKindOfClass:[NSData class]] && artwork.length > 0) {
         NSString *identifier = jsonSafe(info[@"kMRMediaRemoteNowPlayingInfoArtworkIdentifier"]);
         NSString *key = [NSString stringWithFormat:@"%@|%@|%@|%lu", identifier ?: @"", title,
                          out[@"album"], (unsigned long)artwork.length];
         out[@"artworkID"] = key;
-        // Only send the (large) image when it changes; the app caches it.
-        if (![key isEqualToString:gLastArtworkKey]) {
-            out[@"artwork"] = [artwork base64EncodedStringWithOptions:0];
-            gLastArtworkKey = key;
-        }
+        artworkOut[key] = artwork;
+        gArtworkKeyByApp[appKey] = @[ artworkSignature(info), key ];
     } else {
-        gLastArtworkKey = nil;
+        // Polled without artwork: reuse the key from the last full fetch.
+        NSArray<NSString *> *cached = gArtworkKeyByApp[appKey];
+        if (cached && [cached[0] isEqualToString:artworkSignature(info)] && cached[1].length) {
+            out[@"artworkID"] = cached[1];
+        } else if (!cached || ![cached[0] isEqualToString:artworkSignature(info)]) {
+            gArtworkKeyByApp[appKey] = @[ artworkSignature(info), @"" ];
+        }
     }
-    writeLine(out);
+    return out;
 }
 
-static void scheduleRefresh(double delay);
+/// Sends the full player list, skipping it if nothing changed.
+static void emitPlayers(NSArray<NSMutableDictionary *> *players, NSDictionary<NSString *, NSData *> *artwork) {
+    NSData *plain = [NSJSONSerialization dataWithJSONObject:@{ @"players": players } options:0 error:nil];
+    NSString *payload = plain ? [[NSString alloc] initWithData:plain encoding:NSUTF8StringEncoding] : @"";
+    BOOL newArtwork = NO;
+    for (NSDictionary *p in players) {
+        NSString *key = p[@"artworkID"];
+        if (key && artwork[key] && ![gSentArtwork containsObject:key]) { newArtwork = YES; break; }
+    }
+    if (!newArtwork && [payload isEqualToString:gLastPayload]) return;
+    gLastPayload = payload;
+
+    if (gSentArtwork.count > 40) [gSentArtwork removeAllObjects];
+    for (NSMutableDictionary *p in players) {
+        NSString *key = p[@"artworkID"];
+        if (key && artwork[key] && ![gSentArtwork containsObject:key]) {
+            p[@"artwork"] = [artwork[key] base64EncodedStringWithOptions:0];
+            [gSentArtwork addObject:key];
+        }
+    }
+    writeLine(@{ @"players": players });
+}
 
 static NSString *bundleIDForClient(id client) {
     if (!client || !gClientBundleID) return nil;
@@ -129,41 +164,57 @@ static NSString *bundleIDForClient(id client) {
 
 static BOOL perPlayerAvailable(void) {
     return gGetClients && gGetLocalOrigin && gPlayerPathCreate && gGetStateForPlayer
-        && gGetInfoForPlayer && gSendCommandToApp && gClientBundleID;
+        && gGetInfoForPlayer && gClientBundleID;
 }
 
-/// The system's "now playing" app is paused: look through every app with a
-/// media session and show the first one that is actually playing.
-/// `fallback` emits the (paused) system app when nothing else plays.
-static void findOtherPlayingClient(NSString *systemBundleID, void (^fallback)(void)) {
+/// Adds every other app with a media session (playing or paused) to
+/// `players`, one app per entry, then calls `done`.
+static void collectOtherPlayers(NSString *systemBundleID, NSString *systemTitle,
+                                NSMutableArray *players, NSMutableDictionary *artwork, void (^done)(void)) {
     dispatch_queue_t q = dispatch_get_main_queue();
     gGetClients(q, ^(CFArrayRef cfClients) {
         NSArray *clients = [(__bridge NSArray *)cfClients copy] ?: @[];
         id origin = gGetLocalOrigin();
+        NSMutableSet<NSString *> *seen = [NSMutableSet set];
+        if (systemBundleID.length) [seen addObject:systemBundleID];
         __block NSUInteger index = 0;
+        __block NSUInteger others = 0;
         __block void (^next)(void);
         __block __weak void (^weakNext)(void);
         next = ^{
-            if (index >= clients.count) { gTargetBundleID = nil; next = nil; fallback(); return; }
+            if (index >= clients.count) {
+                gOtherPlayerCount = others;
+                next = nil; // break the retain cycle
+                done();
+                return;
+            }
             id client = clients[index++];
             NSString *bundleID = bundleIDForClient(client);
-            if (bundleID.length == 0 || [bundleID isEqualToString:systemBundleID]) { weakNext(); return; }
+            if (bundleID.length == 0 || [seen containsObject:bundleID]) { weakNext(); return; }
             id path = gPlayerPathCreate(origin, client, nil);
             if (!path) { weakNext(); return; }
             gGetStateForPlayer(path, q, ^(unsigned int state) {
-                if (state != kMRPlaybackStatePlaying) { weakNext(); return; }
-                gGetInfoForPlayer(path, true, q, ^(CFDictionaryRef cfInfo, void *unused) {
+                BOOL playing = state == kMRPlaybackStatePlaying;
+                gGetInfoForPlayer(path, false, q, ^(CFDictionaryRef cfInfo, void *unused) {
                     NSDictionary *info = [(__bridge NSDictionary *)cfInfo copy] ?: @{};
-                    if (![info[@"kMRMediaRemoteNowPlayingInfoTitle"] isKindOfClass:[NSString class]]) { weakNext(); return; }
-                    gTargetBundleID = bundleID;
-                    emit(info, YES, bundleID, NO);
-                    next = nil; // break the retain cycle
-                    // The system only posts change notifications for its own
-                    // now-playing app, so check this one again shortly
-                    // (catches track changes and pauses). Cheap: one query.
-                    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 3 * NSEC_PER_SEC), q, ^{
-                        if (gTargetBundleID) scheduleRefresh(0);
-                    });
+                    NSString *title = info[@"kMRMediaRemoteNowPlayingInfoTitle"];
+                    if (![title isKindOfClass:[NSString class]] || title.length == 0
+                        || (systemBundleID.length == 0 && [title isEqualToString:systemTitle])) {
+                        weakNext(); return;
+                    }
+                    void (^add)(NSDictionary *) = ^(NSDictionary *full) {
+                        NSMutableDictionary *entry = playerEntry(full, playing, bundleID, NO, artwork);
+                        if (entry) { [players addObject:entry]; [seen addObject:bundleID]; others++; }
+                        weakNext();
+                    };
+                    NSArray<NSString *> *cached = gArtworkKeyByApp[bundleID];
+                    if (cached && [cached[0] isEqualToString:artworkSignature(info)]) {
+                        add(info); // same track: artwork already known
+                    } else {
+                        gGetInfoForPlayer(path, true, q, ^(CFDictionaryRef cfFull, void *unused2) {
+                            add([(__bridge NSDictionary *)cfFull copy] ?: info);
+                        });
+                    }
                 });
             });
         };
@@ -174,16 +225,22 @@ static void findOtherPlayingClient(NSString *systemBundleID, void (^fallback)(vo
 
 static void refreshNow(void) {
     dispatch_queue_t q = dispatch_get_main_queue();
+    NSUInteger generation = ++gGeneration;
     gGetIsPlaying(q, ^(Boolean playing) {
         gGetInfo(q, ^(CFDictionaryRef cfInfo) {
             NSDictionary *info = [(__bridge NSDictionary *)cfInfo copy] ?: @{};
-            void (^finish)(NSString *) = ^(NSString *bundleID) {
-                if (playing || !perPlayerAvailable()) {
-                    gTargetBundleID = nil;
-                    emit(info, playing, bundleID, YES);
-                } else {
-                    findOtherPlayingClient(bundleID, ^{ emit(info, playing, bundleID, YES); });
-                }
+            void (^finish)(NSString *) = ^(NSString *systemID) {
+                gSystemBundleID = systemID;
+                NSMutableArray *players = [NSMutableArray array];
+                NSMutableDictionary *artwork = [NSMutableDictionary dictionary];
+                NSMutableDictionary *system = playerEntry(info, playing, systemID, YES, artwork);
+                if (system) [players addObject:system];
+                void (^send)(void) = ^{
+                    if (generation != gGeneration) return; // a newer refresh is running
+                    emitPlayers(players, artwork);
+                };
+                if (!perPlayerAvailable()) { gOtherPlayerCount = 0; send(); return; }
+                collectOtherPlayers(systemID, system[@"title"], players, artwork, send);
             };
             if (gGetClient && gClientBundleID) {
                 gGetClient(q, ^(id client) { finish(bundleIDForClient(client)); });
@@ -204,28 +261,40 @@ static void scheduleRefresh(double delay) {
     });
 }
 
-/// Sends to the app being shown: a specific playing app if we picked one,
-/// otherwise the system's now-playing app.
-static void send(int command) {
-    if (gTargetBundleID && gSendCommandToApp) {
-        gSendCommandToApp(command, NULL, NULL, (__bridge CFStringRef)gTargetBundleID, 0, NULL, NULL);
-    } else {
-        gSendCommand(command, NULL);
-    }
+/// Sends to the system's now-playing app. A command aimed at any other app
+/// is dropped: macOS routes it to the now-playing app anyway (verified on
+/// macOS 26 with SendCommandToApp/ToClient/ToPlayer), which would control
+/// the wrong player. The app controls those players another way.
+static void send(int command, NSString *bundleID) {
+    BOOL isSystem = bundleID.length == 0 || [bundleID isEqualToString:gSystemBundleID];
+    if (isSystem) gSendCommand(command, NULL);
 }
 
+/// Commands: toggle|play|pause|next|prev [bundleID]   or   seek <seconds> [bundleID]
 static void handleCommand(NSString *line) {
     NSArray<NSString *> *parts = [line componentsSeparatedByString:@" "];
     NSString *cmd = parts.firstObject;
-    if ([cmd isEqualToString:@"toggle"]) send(kMRTogglePlayPause);
-    else if ([cmd isEqualToString:@"play"]) send(kMRPlay);
-    else if ([cmd isEqualToString:@"pause"]) send(kMRPause);
-    else if ([cmd isEqualToString:@"next"]) send(kMRNextTrack);
-    else if ([cmd isEqualToString:@"prev"]) send(kMRPreviousTrack);
-    else if ([cmd isEqualToString:@"seek"] && parts.count > 1 && gSetElapsed && !gTargetBundleID) gSetElapsed(parts[1].doubleValue);
+    NSString *target = nil;
+    if ([cmd isEqualToString:@"seek"]) {
+        if (parts.count > 2) target = parts[2];
+    } else if (parts.count > 1) {
+        target = parts[1];
+    }
+    if ([cmd isEqualToString:@"toggle"]) send(kMRTogglePlayPause, target);
+    else if ([cmd isEqualToString:@"play"]) send(kMRPlay, target);
+    else if ([cmd isEqualToString:@"pause"]) send(kMRPause, target);
+    else if ([cmd isEqualToString:@"next"]) send(kMRNextTrack, target);
+    else if ([cmd isEqualToString:@"prev"]) send(kMRPreviousTrack, target);
+    else if ([cmd isEqualToString:@"seek"] && parts.count > 1 && gSetElapsed
+             && (target.length == 0 || [target isEqualToString:gSystemBundleID])) gSetElapsed(parts[1].doubleValue);
     else if ([cmd isEqualToString:@"refresh"]) { /* just refresh below */ }
+    else if ([cmd isEqualToString:@"forget-artwork"]) { [gSentArtwork removeAllObjects]; [gArtworkKeyByApp removeAllObjects]; return; }
     else return;
     scheduleRefresh(0.25);
+    // Some apps take a moment to report the new state.
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        scheduleRefresh(0);
+    });
 }
 
 static void startReadingCommands(void) {
@@ -270,13 +339,14 @@ void islandmedia_run(void *unused1, void *unused2) {
     gPlayerPathCreate = (MRPlayerPathCreateFn)dlsym(mr, "MRNowPlayingPlayerPathCreate");
     gGetStateForPlayer = (MRGetStateForPlayerFn)dlsym(mr, "MRMediaRemoteGetPlaybackStateForPlayer");
     gGetInfoForPlayer = (MRGetInfoForPlayerFn)dlsym(mr, "MRMediaRemoteGetNowPlayingInfoForPlayer");
-    gSendCommandToApp = (MRSendCommandToAppFn)dlsym(mr, "MRMediaRemoteSendCommandToApp");
     MRRegisterFn registerFn = (MRRegisterFn)dlsym(mr, "MRMediaRemoteRegisterForNowPlayingNotifications");
     if (!gGetInfo || !gGetIsPlaying || !gSendCommand || !registerFn) {
         writeLine(@{ @"error": @"MediaRemote symbols missing" });
         exit(1);
     }
 
+    gSentArtwork = [NSMutableSet set];
+    gArtworkKeyByApp = [NSMutableDictionary dictionary];
     registerFn(dispatch_get_main_queue());
     NSArray *names = @[ @"kMRMediaRemoteNowPlayingInfoDidChangeNotification",
                         @"kMRMediaRemoteNowPlayingApplicationIsPlayingDidChangeNotification",
@@ -290,11 +360,16 @@ void islandmedia_run(void *unused1, void *unused2) {
     startReadingCommands();
     refreshNow();
 
-    // Slow safety net in case a notification is missed. Cheap: one query per 20s.
+    // Other apps send no notifications, so poll every 2s while any exist.
+    // Otherwise a slow safety net (every 20s) in case a notification is missed.
     static dispatch_source_t timer;
+    static unsigned int ticks = 0;
     timer = dispatch_source_create(DISPATCH_SOURCE_TYPE_TIMER, 0, 0, dispatch_get_main_queue());
-    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 20 * NSEC_PER_SEC), 20 * NSEC_PER_SEC, 5 * NSEC_PER_SEC);
-    dispatch_source_set_event_handler(timer, ^{ scheduleRefresh(0); });
+    dispatch_source_set_timer(timer, dispatch_time(DISPATCH_TIME_NOW, 2 * NSEC_PER_SEC), 2 * NSEC_PER_SEC, NSEC_PER_SEC / 2);
+    dispatch_source_set_event_handler(timer, ^{
+        ticks++;
+        if (gOtherPlayerCount > 0 || ticks % 10 == 0) scheduleRefresh(0);
+    });
     dispatch_resume(timer);
 
     CFRunLoopRun();

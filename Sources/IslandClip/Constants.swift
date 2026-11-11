@@ -12,8 +12,19 @@ enum Constants {
     static let expandedWidth: CGFloat = 420
     /// Expanded height below the notch / menu-bar inset, without the music card.
     static let expandedContentHeight: CGFloat = 318
-    /// Extra height added when the Now Playing card is shown.
-    static let mediaCardHeight: CGFloat = 136
+    /// Each app with media gets a row; the open one (or a lone app) also
+    /// shows transport buttons and a progress bar underneath.
+    static let mediaRowHeight: CGFloat = 54
+    static let mediaControlsHeight: CGFloat = 70
+    static let maxMediaRows = 3
+
+    /// Height the media area adds for `players` apps (0 = none).
+    static func mediaHeight(players: Int, showsControls: Bool) -> CGFloat {
+        guard players > 0 else { return 0 }
+        let rows = CGFloat(min(players, maxMediaRows))
+        let controls = players == 1 || showsControls ? mediaControlsHeight : 0
+        return rows * mediaRowHeight + controls + 12
+    }
     /// Width added on each side of the collapsed pill for live activities (music, "Copied").
     static let liveActivityWing: CGFloat = 40
     /// Wider wings for the "Copied" confirmation so the word fits beside the notch.

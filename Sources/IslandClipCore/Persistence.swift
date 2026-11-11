@@ -10,17 +10,45 @@ import os
 public final class Persistence {
     public let directory: URL
     private let fileManager = FileManager.default
-    private static let log = Logger(subsystem: "com.example.islandclip", category: "persistence")
+    private static let log = Logger(subsystem: "com.zk19604.dynamic-island", category: "persistence")
 
     public init(directory: URL) {
         self.directory = directory
     }
 
-    /// ~/Library/Application Support/IslandClip
-    public static func defaultDirectory() -> URL {
-        let base = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
+    static let folderName = "dynamic-island"
+    /// Folder used before the app was renamed from IslandClip.
+    static let legacyFolderName = "IslandClip"
+
+    static var applicationSupport: URL {
+        FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask).first
             ?? URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support")
-        return base.appendingPathComponent("IslandClip", isDirectory: true)
+    }
+
+    /// ~/Library/Application Support/dynamic-island
+    public static func defaultDirectory() -> URL {
+        applicationSupport.appendingPathComponent(folderName, isDirectory: true)
+    }
+
+    /// One-time move of data saved under the old app name
+    /// (~/Library/Application Support/IslandClip) to the new folder, so
+    /// clipboard history and notes survive the rename. Does nothing if
+    /// there's no old folder or the new one already exists.
+    @discardableResult
+    public static func migrateLegacyDirectory(in base: URL? = nil) -> Bool {
+        let base = base ?? applicationSupport
+        let fm = FileManager.default
+        let old = base.appendingPathComponent(legacyFolderName, isDirectory: true)
+        let new = base.appendingPathComponent(folderName, isDirectory: true)
+        guard fm.fileExists(atPath: old.path), !fm.fileExists(atPath: new.path) else { return false }
+        do {
+            try fm.moveItem(at: old, to: new)
+            log.notice("Moved data from IslandClip to dynamic-island")
+            return true
+        } catch {
+            log.error("Could not move old data folder: \(error.localizedDescription, privacy: .public)")
+            return false
+        }
     }
 
     public func url(for fileName: String) -> URL {

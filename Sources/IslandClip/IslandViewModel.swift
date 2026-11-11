@@ -35,7 +35,11 @@ enum LiveActivity: Equatable {
 final class IslandViewModel: ObservableObject {
     @Published var isExpanded = false
     @Published var activity: LiveActivity = .none
-    @Published var showsMediaCard = false
+    /// How many media apps the expanded panel shows (0 = no media area).
+    @Published var mediaPlayerCount = 0
+    var showsMediaCard: Bool { mediaPlayerCount > 0 }
+    /// Player whose full controls are open (hovered or clicked row).
+    @Published var expandedPlayerID: String?
     @Published var selectedTab: IslandTab = .clipboard
     /// Bumped after a resize animation settles to rebuild the glass layer.
     /// Glass created mid-animation (while the window resizes) renders frosted
@@ -72,9 +76,10 @@ final class IslandViewModel: ObservableObject {
         geometry.hasNotch ? geometry.notchSize.height + 4 : 34
     }
 
-    func shapeSize(expanded: Bool, activity: LiveActivity, media: Bool) -> CGSize {
+    func shapeSize(expanded: Bool, activity: LiveActivity, mediaPlayers: Int, mediaControls: Bool) -> CGSize {
         if expanded {
-            let height = contentTopInset + Constants.expandedContentHeight + (media ? Constants.mediaCardHeight : 0)
+            let height = contentTopInset + Constants.expandedContentHeight
+                + Constants.mediaHeight(players: mediaPlayers, showsControls: mediaControls)
             return CGSize(width: Constants.expandedWidth,
                           height: min(height, geometry.screenFrame.height * 0.85))
         }
@@ -87,8 +92,10 @@ final class IslandViewModel: ObservableObject {
         return CGSize(width: body.width + topFlare(expanded: false) * 2, height: body.height)
     }
 
-    var shapeSize: CGSize { shapeSize(expanded: isExpanded, activity: activity, media: showsMediaCard) }
-    var expandedSize: CGSize { shapeSize(expanded: true, activity: activity, media: showsMediaCard) }
+    var shapeSize: CGSize { shapeSize(expanded: isExpanded, activity: activity, mediaPlayers: mediaPlayerCount,
+                                                 mediaControls: expandedPlayerID != nil) }
+    var expandedSize: CGSize { shapeSize(expanded: true, activity: activity, mediaPlayers: mediaPlayerCount,
+                                                 mediaControls: expandedPlayerID != nil) }
 
     func topFlare(expanded: Bool) -> CGFloat {
         expanded ? Constants.expandedTopFlare : Constants.collapsedTopFlare

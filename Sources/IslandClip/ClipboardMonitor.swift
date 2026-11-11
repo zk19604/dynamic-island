@@ -43,7 +43,7 @@ final class ClipboardMonitor {
         timer = nil
     }
 
-    /// True when the user has set IslandClip to "Deny" in the pasteboard privacy settings (macOS 15.4+).
+    /// True when the user has set the app to "Deny" in the pasteboard privacy settings (macOS 15.4+).
     var isAccessDenied: Bool {
         if #available(macOS 15.4, *) {
             return pasteboard.accessBehavior == .alwaysDeny

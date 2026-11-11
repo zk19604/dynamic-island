@@ -33,6 +33,8 @@ struct IslandActions {
     var copy: (ClipItem) -> Void
     var collapse: () -> Void
     var focusPanel: () -> Void
+    /// Open (player id) or close (nil) a media row's full controls.
+    var showPlayerControls: (String?) -> Void
 }
 
 // MARK: - Root
@@ -261,7 +263,8 @@ struct LiveActivityView: View {
                     .foregroundStyle(.primary)
                     .fixedSize()
             case .music, .none:
-                ArtworkView(image: nowPlaying.artwork, cornerRadius: 5)
+                // A browser tab has no album art: show the app's icon instead.
+                ArtworkView(image: nowPlaying.artwork ?? nowPlaying.sourceAppIcon, cornerRadius: 5)
                     .frame(width: iconSize, height: iconSize)
                 Spacer(minLength: 0)
                 WaveformView(isPlaying: nowPlaying.info?.isPlaying == true,
@@ -286,8 +289,10 @@ struct ExpandedIslandView: View {
         VStack(spacing: 12) {
             Color.clear.frame(height: model.contentTopInset - 4)
             if model.showsMediaCard {
-                NowPlayingCard(service: services.nowPlaying)
-                    .frame(height: Constants.mediaCardHeight - 12)
+                NowPlayingSection(service: services.nowPlaying, model: model,
+                                  showControls: actions.showPlayerControls)
+                    .frame(height: Constants.mediaHeight(players: model.mediaPlayerCount,
+                                                         showsControls: model.expandedPlayerID != nil) - 12)
                     .transition(.opacity)
             }
             IslandTabBar(selection: $model.selectedTab)

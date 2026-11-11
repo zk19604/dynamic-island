@@ -23,11 +23,11 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         super.init()
 
         if let button = statusItem.button {
-            let image = NSImage(systemSymbolName: "capsule.fill", accessibilityDescription: "IslandClip")
-                ?? NSImage(systemSymbolName: "rectangle.topthird.inset.filled", accessibilityDescription: "IslandClip")
+            let image = NSImage(systemSymbolName: "capsule.fill", accessibilityDescription: "dynamic-island")
+                ?? NSImage(systemSymbolName: "rectangle.topthird.inset.filled", accessibilityDescription: "dynamic-island")
             image?.isTemplate = true
             button.image = image
-            button.toolTip = "IslandClip"
+            button.toolTip = "dynamic-island"
         }
 
         let menu = NSMenu()
@@ -36,7 +36,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         launchAtLoginItem.target = self
         let clearItem = NSMenuItem(title: "Clear Clipboard History", action: #selector(clearClipboard), keyEquivalent: "")
         clearItem.target = self
-        let quitItem = NSMenuItem(title: "Quit IslandClip", action: #selector(quit), keyEquivalent: "q")
+        let quitItem = NSMenuItem(title: "Quit dynamic-island", action: #selector(quit), keyEquivalent: "q")
         quitItem.target = self
 
         menu.addItem(toggleIslandItem)
@@ -72,7 +72,7 @@ final class MenuBarController: NSObject, NSMenuDelegate {
         } catch {
             let alert = NSAlert()
             alert.messageText = "Couldn't change Launch at Login"
-            alert.informativeText = "\(error.localizedDescription)\n\nYou can also add IslandClip in System Settings › General › Login Items."
+            alert.informativeText = "\(error.localizedDescription)\n\nYou can also add dynamic-island in System Settings › General › Login Items."
             NSApp.activate(ignoringOtherApps: true)
             alert.runModal()
         }

@@ -1,4 +1,4 @@
-# IslandClip
+# dynamic-island
 
 A Dynamic Island for your Mac. A small black pill sits at the top-center of
 your screen (around the notch on MacBooks that have one). Hover over it and it
@@ -32,23 +32,23 @@ machine and ad-hoc signed.
 ```sh
 swift build -c release          # compile only
 swift test                      # unit tests
-scripts/build_app.sh            # build + assemble + ad-hoc sign → build/IslandClip.app
-open build/IslandClip.app
+scripts/build_app.sh            # build + assemble + ad-hoc sign → build/dynamic-island.app
+open build/dynamic-island.app
 scripts/install_local.sh        # build, copy to ~/Applications, launch
 ```
 
 `UNIVERSAL=1 scripts/build_app.sh` builds an arm64 + x86_64 app (requires the
 full Xcode; Command Line Tools alone build for your Mac's own architecture).
 
-Debug flag: `open build/IslandClip.app --args --expanded` keeps the island open.
+Debug flag: `open build/dynamic-island.app --args --expanded` keeps the island open.
 
 ## Install with Homebrew
 
 ```sh
-brew tap YOUR_GITHUB_USER/tap
-brew install YOUR_GITHUB_USER/tap/islandclip
-ln -sf "$(brew --prefix)/opt/islandclip/IslandClip.app" ~/Applications/IslandClip.app
-open ~/Applications/IslandClip.app
+brew tap zk19604/tap
+brew install zk19604/tap/dynamic-island
+ln -sf "$(brew --prefix)/opt/dynamic-island/dynamic-island.app" ~/Applications/dynamic-island.app
+open ~/Applications/dynamic-island.app
 ```
 
 The first install takes a few minutes because Homebrew compiles the app from
@@ -70,12 +70,12 @@ warning: nothing was downloaded as a binary, so nothing is quarantined.
 
 ## Permissions and privacy
 
-IslandClip does **not** ask for Accessibility, Screen Recording, or Input
+dynamic-island does **not** ask for Accessibility, Screen Recording, or Input
 Monitoring.
 
 - **Clipboard.** Reading the clipboard needs no permission. macOS 15.4 and
-  later include a pasteboard-privacy control. If it's active for IslandClip,
-  macOS may show an alert asking whether IslandClip may access content copied
+  later include a pasteboard-privacy control. If it's active for dynamic-island,
+  macOS may show an alert asking whether dynamic-island may access content copied
   from other apps. Choose **Allow**, or change it later under
   **System Settings → Privacy & Security** (the pasteboard / "Paste from other
   apps" section). If access is denied, the clipboard section shows a short
@@ -85,13 +85,13 @@ Monitoring.
   conventions used by 1Password, Bitwarden, KeePassXC and others) are never
   recorded. File copies, images, and text over 200,000 characters are skipped.
 - **Now Playing.** Since macOS 15.4 Apple only gives "Now Playing" information to
-  Apple-signed processes. IslandClip therefore starts `/usr/bin/perl` (built
+  Apple-signed processes. The app therefore starts `/usr/bin/perl` (built
   into macOS) with a tiny bundled helper library that reads the media state
   and passes it to the app over a pipe. You'll see a `perl` process (~16 MB,
-  idle at 0% CPU) while IslandClip runs. It exits when IslandClip quits. No
+  idle at 0% CPU) while the app runs. It exits when the app quits. No
   permission prompt is involved. If Apple removes perl or closes this path,
   the music card simply doesn't appear; everything else keeps working.
-- **Storage.** `~/Library/Application Support/IslandClip/`
+- **Storage.** `~/Library/Application Support/dynamic-island/`
   - `history.json`: clipboard history (file mode 0600, owner-only)
   - `notes.json`: notes (0600)
   - Writes are atomic. An unreadable file is renamed to
@@ -109,10 +109,10 @@ playing: ~0.0% for the app and helper.
 1. Quit from the menu bar icon. If you turned on Launch at Login, turn it
    off first.
 2. Remove the app:
-   - Local install: `rm -rf ~/Applications/IslandClip.app`
-   - Homebrew: `brew uninstall islandclip && rm -f ~/Applications/IslandClip.app`
-3. Remove data (optional): `rm -rf ~/Library/Application\ Support/IslandClip`
-4. Remove preferences (optional): `defaults delete com.example.islandclip`
+   - Local install: `rm -rf ~/Applications/dynamic-island.app`
+   - Homebrew: `brew uninstall dynamic-island && rm -f ~/Applications/dynamic-island.app`
+3. Remove data (optional): `rm -rf ~/Library/Application\ Support/dynamic-island`
+4. Remove preferences (optional): `defaults delete com.zk19604.dynamic-island`
 
 ## Project layout
 
@@ -124,9 +124,9 @@ Sources/IslandClip/          app: AppDelegate, IslandPanel, IslandWindowControll
 Sources/IslandClipCore/      testable logic: ClipboardStore, NotesStore, Persistence
 Sources/IslandMediaHelper/   Objective-C Now Playing bridge (loaded by /usr/bin/perl)
 Tests/IslandClipCoreTests/   unit tests (swift test)
-Resources/Info.plist         LSUIElement agent app, bundle id com.example.islandclip
+Resources/Info.plist         LSUIElement agent app, bundle id com.zk19604.dynamic-island
 scripts/                     build_app.sh, install_local.sh
-Formula/islandclip.rb        Homebrew formula (copy into your tap)
+Formula/dynamic-island.rb        Homebrew formula (copy into your tap)
 docs/RELEASING.md            how to publish a release and the tap
 ```
 
@@ -138,5 +138,6 @@ docs/RELEASING.md            how to publish a release and the tap
 - After `brew upgrade`, Launch at Login may need to be toggled again
   (the app path in the Cellar changes).
 - TODO: "Ignore these apps" setting and an optional global shortcut.
-- The bundle id `com.example.islandclip` is a placeholder. Change it in
-  `Resources/Info.plist` (and the formula test) before publishing.
+- Upgrading from the old IslandClip name: on first launch the app moves
+  `~/Library/Application Support/IslandClip` to `.../dynamic-island`, so
+  history and notes carry over.

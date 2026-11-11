@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# Builds IslandClip.app from source and ad-hoc signs it.
+# Builds dynamic-island.app from source and ad-hoc signs it.
 #
 #   scripts/build_app.sh                 # native arch, output in ./build
 #   UNIVERSAL=1 scripts/build_app.sh     # arm64 + x86_64 (needs full Xcode)
 #
 # Environment:
-#   OUTPUT_DIR         where IslandClip.app goes (default: ./build)
+#   OUTPUT_DIR         where dynamic-island.app goes (default: ./build)
 #   SWIFT_BUILD_FLAGS  extra flags for `swift build` (Homebrew passes --disable-sandbox)
 #
 # Ad-hoc signing ("codesign --sign -") needs no Apple account or certificate.
@@ -16,7 +16,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 OUTPUT_DIR="${OUTPUT_DIR:-$ROOT/build}"
-APP="$OUTPUT_DIR/IslandClip.app"
+APP="$OUTPUT_DIR/dynamic-island.app"
 # shellcheck disable=SC2206
 FLAGS=(-c release ${SWIFT_BUILD_FLAGS:-})
 if [[ "${UNIVERSAL:-0}" == "1" ]]; then
@@ -30,9 +30,10 @@ BIN_DIR="$(swift build "${FLAGS[@]}" --show-bin-path)"
 echo "==> Assembling $APP"
 rm -rf "$APP"
 mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Frameworks" "$APP/Contents/Resources"
-cp "$BIN_DIR/IslandClip" "$APP/Contents/MacOS/IslandClip"
+cp "$BIN_DIR/IslandClip" "$APP/Contents/MacOS/dynamic-island"
 cp "$BIN_DIR/libIslandMediaHelper.dylib" "$APP/Contents/Frameworks/libIslandMediaHelper.dylib"
 cp "$ROOT/Resources/Info.plist" "$APP/Contents/Info.plist"
+cp "$ROOT/Resources/AppIcon.icns" "$APP/Contents/Resources/AppIcon.icns"
 printf 'APPL????' > "$APP/Contents/PkgInfo"
 
 echo "==> Ad-hoc signing"

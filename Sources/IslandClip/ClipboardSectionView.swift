@@ -60,7 +60,7 @@ struct ClipboardSectionView: View {
             }
 
             if monitor.isAccessDenied {
-                Text("Clipboard access is denied. Allow IslandClip in System Settings › Privacy & Security.")
+                Text("Clipboard access is denied. Allow dynamic-island in System Settings › Privacy & Security.")
                     .font(.system(size: 11))
                     .foregroundStyle(.orange)
             }

@@ -47,6 +47,31 @@ final class IslandPanel: NSPanel {
         onCancel?()
     }
 
+    /// ⌘X/C/V/A/Z and ⇧⌘Z. Apps normally get these from the Edit menu, but
+    /// this app has no menu bar and the panel never activates the app, so
+    /// send them to the focused text view directly.
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let flags = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard flags.contains(.command), !flags.contains(.control), !flags.contains(.option),
+              let key = event.charactersIgnoringModifiers?.lowercased() else {
+            return super.performKeyEquivalent(with: event)
+        }
+        let shift = flags.contains(.shift)
+        let action: Selector?
+        switch (key, shift) {
+        case ("x", false): action = #selector(NSText.cut(_:))
+        case ("c", false): action = #selector(NSText.copy(_:))
+        case ("v", false): action = #selector(NSText.paste(_:))
+        case ("v", true): action = #selector(NSTextView.pasteAsPlainText(_:))
+        case ("a", false): action = #selector(NSText.selectAll(_:))
+        case ("z", false): action = Selector(("undo:"))
+        case ("z", true): action = Selector(("redo:"))
+        default: action = nil
+        }
+        if let action, NSApp.sendAction(action, to: nil, from: self) { return true }
+        return super.performKeyEquivalent(with: event)
+    }
+
     /// True while a text view or field inside the panel is being edited.
     var isEditingText: Bool {
         isReallyKey && firstResponder is NSText

@@ -11,6 +11,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationDidFinishLaunching(_ notification: Notification) {
         signal(SIGPIPE, SIG_IGN) // a dead media helper must not kill the app
 
+        Persistence.migrateLegacyDirectory() // IslandClip → dynamic-island, once
         let persistence = Persistence(directory: Persistence.defaultDirectory())
         let clipboard = ClipboardStore(persistence: persistence, maxUnpinned: Constants.maxUnpinnedClipboardItems)
         let notes = NotesStore(persistence: persistence, saveDelay: Constants.notesSaveDebounce)
