@@ -7,7 +7,7 @@
 class DynamicIsland < Formula
   desc "Notch island for the Mac: Now Playing, clipboard history and quick notes"
   homepage "https://github.com/zk19604/dynamic-island"
-  url "https://github.com/zk19604/dynamic-island/archive/refs/tags/v1.0.1.tar.gz"
+  url "https://github.com/zk19604/dynamic-island/archive/refs/tags/v1.0.2.tar.gz"
   sha256 "REPLACE_WITH_SHA256_OF_THE_TARBALL"
   license "MIT"
 

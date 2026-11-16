@@ -1,5 +1,6 @@
 import AppKit
 import SwiftUI
+import OSLog
 
 /// Borderless, transparent, non-activating floating panel.
 ///
@@ -114,7 +115,11 @@ final class IslandHostingView<Content: View>: NSHostingView<Content> {
 
     override func mouseExited(with event: NSEvent) {
         super.mouseExited(with: event)
-        if event.trackingArea === hoverArea { onMouse?(nil) }
+        Logger(subsystem: "com.zk19604.dynamic-island", category: "hover")
+            .debug("mouse exited: current tracking area=\(event.trackingArea === self.hoverArea)")
+        // An exit can belong to an area replaced during resizing. Read the
+        // actual cursor so a delayed exit cannot override a newer entry.
+        onMouse?(window?.mouseLocationOutsideOfEventStream)
     }
 
     override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }

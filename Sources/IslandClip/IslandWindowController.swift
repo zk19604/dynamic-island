@@ -1,6 +1,7 @@
 import AppKit
 import Combine
 import SwiftUI
+import OSLog
 
 /// Owns the panel and drives every island state change.
 ///
@@ -11,6 +12,7 @@ import SwiftUI
 /// Keeping the window tight matters: its transparent area would otherwise
 /// sit over other apps.
 final class IslandWindowController {
+    private static let log = Logger(subsystem: "com.zk19604.dynamic-island", category: "hover")
     let panel = IslandPanel()
     let model: IslandViewModel
     private let services: IslandServices
@@ -25,6 +27,13 @@ final class IslandWindowController {
     private var toastWork: DispatchWorkItem?
     private var musicHideWork: DispatchWorkItem?
     private var outsideClickMonitor: Any?
+    private var mouseMoveMonitor: Any?
+    private var textFocusMonitor: Any?
+    private var workspaceObserver: NSObjectProtocol?
+    private var lastCursorSync = ProcessInfo.processInfo.systemUptime
+    private var ignoreHoverEvents = false
+    private var isTransitioning = false
+    private var userFocusedText = false
     private var cancellables = Set<AnyCancellable>()
     /// `--expanded` launch flag: stay open (handy for screenshots/debugging).
     private let stayExpanded: Bool
@@ -57,6 +66,17 @@ final class IslandWindowController {
             self?.scheduleCollapse()
         }
 
+        workspaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification, object: nil, queue: .main
+        ) { [weak self] notification in
+            guard let self, self.model.isExpanded,
+                  let app = notification.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.processIdentifier != ProcessInfo.processInfo.processIdentifier else { return }
+            self.userFocusedText = false
+            self.panel.makeFirstResponder(nil)
+            self.scheduleCollapse()
+        }
+
         model.$theme
             .sink { [weak self] theme in
                 guard let self else { return }
@@ -82,17 +102,26 @@ final class IslandWindowController {
         }
     }
 
+    deinit {
+        if let workspaceObserver { NSWorkspace.shared.notificationCenter.removeObserver(workspaceObserver) }
+        removeOutsideClickMonitor()
+    }
+
     // MARK: - Visibility
 
     func show() {
         isVisible = true
         panel.orderFrontRegardless()
+        syncHoverWithCursor()
     }
 
     func hide() {
         isVisible = false
         collapse(force: true)
         panel.orderOut(nil)
+        collapseWork?.cancel()
+        isHovering = false
+        suppressHoverUntilExit = false
     }
 
     // MARK: - Hover & focus
@@ -102,9 +131,20 @@ final class IslandWindowController {
     /// hovering: the visible pill plus a few points when closed, the panel
     /// itself when open.
     private func mouseMoved(to point: CGPoint?) {
+        guard !ignoreHoverEvents, !isTransitioning, isVisible, panel.isVisible else { return }
         let inside = point.map { hoverRect().contains($0) } ?? false
         guard inside != isHovering else { return }
         hoverChanged(inside)
+    }
+
+    private var isCursorOverIsland: Bool {
+        guard isVisible, panel.isVisible else { return false }
+        return hoverRect().contains(panel.mouseLocationOutsideOfEventStream)
+    }
+
+    private func syncHoverWithCursor() {
+        mouseMoved(to: panel.mouseLocationOutsideOfEventStream)
+        if model.isExpanded && !isHovering && collapseWork == nil { scheduleCollapse() }
     }
 
     /// Island outline in window coordinates (origin bottom-left).
@@ -119,6 +159,7 @@ final class IslandWindowController {
     }
 
     private func hoverChanged(_ inside: Bool) {
+        Self.log.debug("hover changed: inside=\(inside), suppress=\(self.suppressHoverUntilExit)")
         isHovering = inside
         if inside {
             collapseWork?.cancel()
@@ -131,7 +172,10 @@ final class IslandWindowController {
 
     private func scheduleCollapse() {
         collapseWork?.cancel()
-        let work = DispatchWorkItem { [weak self] in self?.collapse() }
+        let work = DispatchWorkItem { [weak self] in
+            self?.collapseWork = nil
+            self?.collapse()
+        }
         collapseWork = work
         DispatchQueue.main.asyncAfter(deadline: .now() + Constants.collapseDelay, execute: work)
     }
@@ -146,9 +190,27 @@ final class IslandWindowController {
     /// need no special permission. Installed only while expanded.
     private func installOutsideClickMonitor() {
         guard outsideClickMonitor == nil else { return }
+        mouseMoveMonitor = NSEvent.addGlobalMonitorForEvents(matching: .mouseMoved) { [weak self] _ in
+            guard let self else { return }
+            let now = ProcessInfo.processInfo.systemUptime
+            guard now - self.lastCursorSync >= 0.05 else { return }
+            self.lastCursorSync = now
+            self.syncHoverWithCursor()
+        }
+        textFocusMonitor = NSEvent.addLocalMonitorForEvents(matching: .leftMouseDown) { [weak self] event in
+            if let self, event.window === self.panel {
+                // AppKit sets the field editor while dispatching this click.
+                DispatchQueue.main.async { [weak self] in
+                    guard let self, self.model.isExpanded else { return }
+                    self.userFocusedText = self.panel.isEditingText
+                }
+            }
+            return event
+        }
         outsideClickMonitor = NSEvent.addGlobalMonitorForEvents(matching: [.leftMouseDown, .rightMouseDown]) { [weak self] _ in
             guard let self else { return }
             if !self.panel.frame.contains(NSEvent.mouseLocation) {
+                self.userFocusedText = false
                 self.panel.makeFirstResponder(nil)
                 self.scheduleCollapse()
             }
@@ -158,6 +220,10 @@ final class IslandWindowController {
     private func removeOutsideClickMonitor() {
         if let monitor = outsideClickMonitor { NSEvent.removeMonitor(monitor) }
         outsideClickMonitor = nil
+        if let monitor = mouseMoveMonitor { NSEvent.removeMonitor(monitor) }
+        mouseMoveMonitor = nil
+        if let monitor = textFocusMonitor { NSEvent.removeMonitor(monitor) }
+        textFocusMonitor = nil
     }
 
     // MARK: - Expand / collapse
@@ -176,8 +242,16 @@ final class IslandWindowController {
     func collapse(force: Bool = false) {
         guard model.isExpanded else { return }
         if !force {
-            if stayExpanded || isHovering || panel.isEditingText { return }
+            isHovering = isCursorOverIsland
+            if !isHovering { suppressHoverUntilExit = false }
+            if stayExpanded { Self.log.debug("collapse blocked: stayExpanded"); return }
+            if isHovering { Self.log.debug("collapse blocked: isHovering"); return }
+            if userFocusedText && panel.isEditingText {
+                Self.log.debug("collapse blocked: isEditingText")
+                return
+            }
         }
+        userFocusedText = false
         if panel.isReallyKey { panel.makeFirstResponder(nil) }
         returnFocusIfTaken()
         services.notes.saveNow()
@@ -194,6 +268,7 @@ final class IslandWindowController {
     /// window (elsewhere it falls back to frosted). In the Glass theme the
     /// open island therefore becomes key; nothing inside gets text focus.
     private func takeFocusForGlass() {
+        Self.log.debug("take Glass focus: responder=\(String(describing: self.panel.firstResponder))")
         guard !panel.isReallyKey else { return }
         tookFocusForGlass = true
         panel.makeKey()
@@ -207,6 +282,13 @@ final class IslandWindowController {
         guard tookFocusForGlass else { return }
         tookFocusForGlass = false
         guard panel.isReallyKey else { return }
+        Self.log.debug("return Glass focus: responder=\(String(describing: self.panel.firstResponder))")
+        ignoreHoverEvents = true
+        DispatchQueue.main.async { [weak self] in
+            guard let self else { return }
+            self.ignoreHoverEvents = false
+            self.syncHoverWithCursor()
+        }
         NSAnimationContext.beginGrouping()
         NSAnimationContext.current.duration = 0
         panel.orderOut(nil)
@@ -216,7 +298,7 @@ final class IslandWindowController {
 
     private func copyBack(_ item: ClipItemRef) {
         services.copyToPasteboard(item)
-        suppressHoverUntilExit = isHovering
+        suppressHoverUntilExit = isCursorOverIsland
         collapse(force: true)
         showCopiedToast()
     }
@@ -273,6 +355,7 @@ final class IslandWindowController {
     private func transition(expanded: Bool? = nil, activity: LiveActivity? = nil,
                             mediaPlayers: Int? = nil, expandedPlayer: String?? = nil,
                             animation: Animation) {
+        isTransitioning = true
         let newExpanded = expanded ?? model.isExpanded
         let newActivity = activity ?? model.activity
         let newMedia = mediaPlayers ?? model.mediaPlayerCount
@@ -291,6 +374,9 @@ final class IslandWindowController {
             model.mediaPlayerCount = newMedia
             model.expandedPlayerID = newOpenPlayer
         }
+
+        isTransitioning = false
+        syncHoverWithCursor()
 
         settleWork?.cancel()
         let work = DispatchWorkItem { [weak self] in
@@ -314,6 +400,7 @@ final class IslandWindowController {
                            y: geometry.screenFrame.maxY - size.height,
                            width: size.width, height: size.height)
         if panel.frame != frame {
+            Self.log.debug("window frame: \(String(describing: self.panel.frame)) -> \(String(describing: frame))")
             panel.setFrame(frame, display: false)
             // Lay out at the new size right now, outside any animation.
             // Otherwise SwiftUI keeps the old (narrower) layout for a frame and
@@ -321,6 +408,7 @@ final class IslandWindowController {
             hostingView.layoutSubtreeIfNeeded()
             panel.displayIfNeeded()
         }
+        if !isTransitioning { syncHoverWithCursor() }
     }
 
     private func screenParametersChanged() {
